@@ -1,0 +1,143 @@
+@page "/planner"
+@using CoursePlanner.Models
+@using CoursePlanner.Services
+@inject AnthropicCoursePlanner PlannerService
+@rendermode InteractiveServer
+
+<PageTitle>Course Planner</PageTitle>
+
+<h1>Course planner</h1>
+<p class="text-muted">
+    Describe what you want to learn. The planner builds a one-month schedule —
+    weekdays, one hour a day, split into theoretical and practical tracks —
+    from reputable sources, and answers in structured JSON.
+</p>
+
+<div class="chat-log border rounded p-3 mb-3" style="min-height: 120px; max-height: 300px; overflow-y: auto;">
+    @foreach (var turn in _turns)
+    {
+        <div class="mb-2">
+            <strong>@(turn.Role == "user" ? "You" : "Planner"):</strong>
+            <span>@turn.Text</span>
+        </div>
+    }
+    @if (_busy)
+    {
+        <div class="text-muted"><em>Planning…</em></div>
+    }
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <div class="alert alert-danger mt-2">@_error</div>
+    }
+</div>
+
+<div class="input-group mb-4">
+    <input class="form-control" placeholder="e.g. bread baking for a beginner"
+           @bind="_input" @bind:event="oninput" @onkeydown="OnKeyDown"
+           disabled="@_busy" />
+    <button class="btn btn-primary" @onclick="Send" disabled="@(_busy || string.IsNullOrWhiteSpace(_input))">
+        Plan
+    </button>
+</div>
+
+@if (_schedule is not null)
+{
+    <h2>@_schedule.Topic</h2>
+    <p class="text-muted">
+        @_schedule.Sessions.Count sessions · weekdays · 1 hour each ·
+        starting @_schedule.StartDate.ToString("MMMM d, yyyy")
+    </p>
+
+    @foreach (var week in _schedule.Sessions.GroupBy(s => WeekIndex(_schedule.StartDate, s.Date)))
+    {
+        <h4 class="mt-4">Week @(week.Key + 1)</h4>
+        <div class="row g-3">
+            @foreach (var s in week.OrderBy(x => x.Date))
+            {
+                <div class="col-md-6 col-lg-4">
+                    <div class="card h-100">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <strong>@s.Date.ToString("ddd, MMM d")</strong>
+                                <span class="badge @(s.Track == "theoretical" ? "bg-secondary" : "bg-success")">@s.Track</span>
+                            </div>
+                            <h6 class="card-title">@s.Title</h6>
+                            <p class="card-text small">@s.Summary</p>
+                            @if (s.Resources.Count > 0)
+                            {
+                                <ul class="small mb-0">
+                                    @foreach (var r in s.Resources)
+                                    {
+                                        <li><a href="@r.Url" target="_blank" rel="noopener">@r.Title</a></li>
+                                    }
+                                </ul>
+                            }
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+
+    <details class="mt-4">
+        <summary>Raw JSON (what the agent returned)</summary>
+        <pre class="border rounded p-3 mt-2" style="max-height: 400px; overflow: auto;">@_rawJson</pre>
+    </details>
+}
+
+@code {
+    private readonly List<(string Role, string Text)> _turns = new();
+    private string _input = "";
+    private bool _busy;
+    private string? _error;
+    private CourseSchedule? _schedule;
+    private string? _rawJson;
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await Send();
+    }
+
+    private async Task Send()
+    {
+        var text = _input.Trim();
+        if (string.IsNullOrEmpty(text) || _busy) return;
+
+        _turns.Add(("user", text));
+        _input = "";
+        _busy = true;
+        _error = null;
+
+        try
+        {
+            var result = await PlannerService.PlanAsync(text);
+            if (result.Ok && result.Schedule is not null)
+            {
+                _schedule = result.Schedule;
+                _rawJson = System.Text.Json.JsonSerializer.Serialize(
+                    _schedule,
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                _turns.Add(("assistant",
+                    $"Built a {_schedule.Sessions.Count}-session plan on '{_schedule.Topic}' " +
+                    $"starting {_schedule.StartDate:MMMM d}. " +
+                    $"Ask for changes any time — e.g. 'make week 3 all practical'."));
+            }
+            else
+            {
+                _error = result.Error;
+                _turns.Add(("assistant", "I couldn't build that plan. " + result.Error));
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private static int WeekIndex(DateOnly start, DateOnly date) =>
+        (date.DayNumber - start.DayNumber) / 7;
+}
